@@ -1,0 +1,172 @@
+import pandas as pd
+import json
+import ast
+import os
+import time
+import requests
+
+# --- Setup API Key Securely ---
+api_key = os.getenv("OPENROUTER_API_KEY")
+if not api_key:
+    raise ValueError("API key not found. Please set the OPENROUTER_API_KEY environment variable.")
+
+# --- NEW: Define your model and desired provider ---
+# Use the generic model name and filter by provider below.
+model_name = "google/gemma-2-9b-it" 
+# Set to the provider you want to use, e.g., 'fireworks-ai', or None to not filter.
+provider_to_use = 'chutes/bf16' 
+
+# Prepare safe model name for filenames
+safe_model_name = model_name.replace("/", "_").replace(":", "_")
+
+# File paths
+input_file_path = r'C:\Users\ASUS\Desktop\amin\LLM quantization\datasets\medQA_sampled_100.xlsx'
+output_directory = r'C:\Users\ASUS\Desktop\amin\LLM quantization\experiment_1_output\new_result_medqa'
+os.makedirs(output_directory, exist_ok=True)
+
+# Load Excel file
+df = pd.read_excel(input_file_path)
+
+# Validate columns
+if 'question' not in df.columns or 'options' not in df.columns:
+    raise ValueError("The Excel file must contain 'question' and 'options' columns.")
+
+# Define prompts
+user_prompts = [
+    (1, "Answer the following question and select one option from the provided options."),
+    (2, "Imagine you are a USMLE tutor facing this USMLE exam question. The goal of the USMLE is to assess a physician's knowledge. As an expert in the field, which answer would you choose?"),
+    (3, "Answer the following question and select one option from the provided options. Please go through each option and detail your reasoning process behind evaluating each one to determine the correct answer."),
+    (4, "Answer the following question and select one option from the provided options. Please select the correct answer and provide a justification for your choice."),
+    (5, "Imagine you are a USMLE tutor and medical faculty member facing this USMLE exam question. The goal of the USMLE is to assess a physician's ability to apply knowledge, concepts, and principles crucial for providing safe and effective patient care. As an expert in the field, which answer would you choose and why?"),
+    (6, "Imagine you are a USMLE tutor and medical faculty member facing this USMLE exam question. The goal of the USMLE is to assess a physician's ability to apply knowledge, concepts, and principles crucial for providing safe and effective patient care. As an expert in the field, rate your confidence level in the correctness of each of these options from 1 to 10, where 10 is most confident. Which option scores the highest?")
+]
+
+def create_prompt(question, options, user_prompt):
+    try:
+        options_dict = ast.literal_eval(options)
+        options_str = "\n".join([f"{key}: {value}" for key, value in options_dict.items()])
+        messages = [
+            {"role": "user", "content": f"{user_prompt}: {question}\n\nOptions:\n{options_str}"}
+        ]
+        return messages
+    except (ValueError, SyntaxError) as e:
+        print(f"Error parsing options for question '{question}': {e}")
+        return None
+
+# --- MODIFIED: generate_answer function now uses the 'requests' library ---
+def generate_answer(prompt, temperature, max_tokens, retries=3, delay=5):
+    
+    headers = {
+      'Authorization': f'Bearer {api_key}',
+      # 'HTTP-Referer': '<YOUR_SITE_URL>', # Optional
+      # 'X-Title': '<YOUR_SITE_NAME>',      # Optional
+      'Content-Type': 'application/json',
+    }
+
+    # Construct the JSON payload for the request
+    payload = {
+        'model': model_name,
+        'messages': prompt,
+        'temperature': temperature,
+        'max_tokens': max_tokens,
+    }
+    
+    # Add the provider filter to the payload if one is specified
+    if provider_to_use:
+        payload['provider'] = {
+            'only': [provider_to_use]
+        }
+
+    for attempt in range(retries):
+        try:
+            start_time = time.time()
+            
+            # Make the POST request to the OpenRouter API
+            response = requests.post(
+                'https://openrouter.ai/api/v1/chat/completions', 
+                headers=headers, 
+                json=payload
+            )
+            
+            # Raise an exception for bad status codes (4xx or 5xx)
+            response.raise_for_status() 
+            
+            # Parse the JSON response from the API
+            completion = response.json()
+            
+            end_time = time.time()
+            inference_time = end_time - start_time
+
+            # Extract data from the response dictionary
+            usage = completion.get('usage', {})
+            return {
+                'data': completion, # The full JSON response
+                'final_answer': completion['choices'][0]['message']['content'],
+                'prompt_tokens': usage.get('prompt_tokens'),
+                'completion_tokens': usage.get('completion_tokens'),
+                'inference_time': inference_time
+            }
+            
+        # Catch specific requests-related exceptions
+        except requests.exceptions.RequestException as e:
+            print(f"Request error: {e}")
+            if attempt < retries - 1:
+                print(f"Retrying in {delay} seconds...")
+                time.sleep(delay)
+            else:
+                print("Max retries reached. Skipping this request.")
+                return None
+
+# --- The main function does not need any changes ---
+def main():
+    for prompt_number, system_prompt in user_prompts:
+        for temperature in [0.1, 0.5, 1.0]:
+            for max_tokens in [512, 2048]:
+                results = []
+                device = "GPU"
+
+                metadata = {
+                    'model_name': safe_model_name,
+                    'prompt_number': prompt_number,
+                    'max_tokens': max_tokens,
+                    'temperature': temperature,
+                    'device': device,
+                    'provider_filter': provider_to_use
+                }
+
+                for index, row in df.iterrows():
+                    print(f"Processing row {index + 1}/{len(df)} for prompt {prompt_number} for {max_tokens} for {temperature}")
+                    question = row['question']
+                    options = row['options']
+
+                    prompt = create_prompt(question, options, system_prompt)
+                    if prompt:
+                        answer = generate_answer(prompt, temperature, max_tokens)
+                        if answer:
+                            result = row.to_dict()
+                            result.update({
+                                'system_prompt': system_prompt,
+                                'temperature': temperature,
+                                'max_tokens': max_tokens,
+                                'final_answer': answer['final_answer'],
+                                'response': str(answer['data']),
+                                'Inference Time': answer['inference_time'],
+                                'Input Token Count': answer['prompt_tokens'],
+                                'Output Token Count': answer['completion_tokens'],
+                                'metadata': metadata
+                            })
+                            results.append(result)
+                        else:
+                            print(f"Failed to get response for Question {index+1}. Skipping...")
+
+                if results:
+                    result_df = pd.DataFrame(results)
+                    # Add provider to filename for clarity
+                    provider_tag = f'_provider_{provider_to_use}' if provider_to_use else ''
+                    output_file_name = f'new_{safe_model_name}_prompt_{prompt_number}_max_{max_tokens}_temp_{temperature}{provider_tag}_device_{device}.xlsx'
+                    output_file_path = os.path.join(output_directory, output_file_name)
+                    result_df.to_excel(output_file_path, index=False)
+                    print(f"Results for prompt {prompt_number} saved to {output_file_path}")
+
+if __name__ == "__main__":
+    main()
