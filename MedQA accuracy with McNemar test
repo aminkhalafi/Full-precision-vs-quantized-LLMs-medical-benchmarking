@@ -1,0 +1,118 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from statsmodels.stats.contingency_tables import mcnemar
+
+# === 1. Load Excel file ===
+file_path = r"C:\Users\ASUS\Desktop\amin\LLM quantization\experiment_1_output\for statistical\medqa_with_correctness.xlsx"
+df = pd.read_excel(file_path)
+
+# Clean column names
+df.columns = df.columns.str.strip().str.lower()
+# Expected columns: ['question', 'model', 'quantization', 'correctness']
+
+# Convert correctness to numeric
+df['correctness'] = df['correctness'].map({'correct': 1, 'incorrect': 0})
+
+# === 2. Mean accuracy per model and quantization ===
+acc_summary = (
+    df.groupby(['model', 'quantization'])['correctness']
+    .mean()
+    .reset_index(name='accuracy')
+)
+
+# === 3. McNemar’s test (Full vs Q8, Full vs Q4, Q8 vs Q4) ===
+results = []
+
+for model, subdf in df.groupby('model'):
+    pivot = subdf.pivot(index='question', columns='quantization', values='correctness')
+    if all(q in pivot.columns for q in ['full', 'q8', 'q4']):
+        pairs = [('full', 'q8'), ('full', 'q4'), ('q8', 'q4')]
+        for (a, b) in pairs:
+            valid = pivot.dropna(subset=[a, b])
+            a1b1 = ((valid[a] == 1) & (valid[b] == 1)).sum()
+            a1b0 = ((valid[a] == 1) & (valid[b] == 0)).sum()
+            a0b1 = ((valid[a] == 0) & (valid[b] == 1)).sum()
+            a0b0 = ((valid[a] == 0) & (valid[b] == 0)).sum()
+            table = [[a1b1, a1b0],
+                     [a0b1, a0b0]]
+            res = mcnemar(table, exact=False, correction=True)
+            results.append({
+                'model': model,
+                'comparison': f'{a} vs {b}',
+                'p_value': res.pvalue
+            })
+
+pval_df = pd.DataFrame(results)
+print("\n--- McNemar p-values ---")
+print(pval_df)
+
+# === 4. Sort models by Full accuracy (descending) ===
+full_order = (
+    acc_summary[acc_summary['quantization'].str.lower() == 'full']
+    .sort_values('accuracy', ascending=False)['model']
+    .tolist()
+)
+
+# === 5. Define quantization order and colors ===
+quantization_order = ['full', 'q8', 'q4']
+custom_palette = {
+    'full': '#3498db',   # Blue
+    'q8': '#9b59b6',     # Purple (related tone)
+    'q4': '#e74c3c'      # Red
+}
+
+# === 6. Plot grouped bar chart ===
+plt.figure(figsize=(20, 14))
+
+sns.barplot(
+    data=acc_summary,
+    x='model',
+    y='accuracy',
+    hue='quantization',
+    order=full_order,
+    hue_order=quantization_order,
+    palette=custom_palette
+)
+
+# Add percentage labels inside bars
+for container in plt.gca().containers:
+    plt.bar_label(container,
+                  labels=[f"{v.get_height()*100:.1f}%" for v in container],
+                  label_type='center',   # inside bars
+                  fontsize=12,
+                  color='white',         # white text for contrast
+                  fontweight='bold')
+
+# Increase label and title font sizes
+plt.ylabel('Accuracy', fontsize=18)
+plt.xlabel('Model', fontsize=18)
+plt.title('Accuracy for MedQA Dataset', fontsize=20)
+
+# Adjust tick labels and legend font size
+plt.xticks(fontsize=14, rotation=45, ha='right')
+plt.yticks(fontsize=14)
+plt.legend(title='Quantization', fontsize=14, title_fontsize=15)
+
+plt.ylim(0, 1.05)
+
+# === 7. Annotate p-values above each model group ===
+for model in full_order:
+    model_pvals = pval_df[pval_df['model'] == model]
+    if not model_pvals.empty:
+        ypos = acc_summary[acc_summary['model'] == model]['accuracy'].max() + 0.03
+        text = "\n".join([
+            f"{r['comparison']} p={r['p_value']:.3f}"
+            for _, r in model_pvals.iterrows()
+        ])
+        x = full_order.index(model)
+        plt.text(x, ypos, text, ha='center', va='bottom', fontsize=12, fontweight='bold')
+
+plt.tight_layout()
+
+# === 8. Save figure as high-quality PDF ===
+output_path = r"C:\Users\ASUS\Desktop\amin\LLM quantization\experiment_1_output\for statistical\mcnemar for medqa.pdf"
+plt.savefig(output_path, format='pdf', dpi=400)
+plt.show()
+
+print(f"\n✅ PDF saved successfully at: {output_path}")
