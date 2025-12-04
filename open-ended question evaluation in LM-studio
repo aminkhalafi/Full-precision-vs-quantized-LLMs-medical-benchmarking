@@ -1,0 +1,135 @@
+import pandas as pd
+import json
+import os
+import requests
+import time  # Importing time module to calculate inference time
+
+# Define the API endpoint and your API key
+api_endpoint = "https://*****.proxy.runpod.net/v1/chat/completions"
+api_key = "ollama"
+model_name = 'mixtral:8x7b-instruct-v0.1-q4_0'
+
+# Define the headers for the request
+headers = {
+    "Authorization": f"Bearer {api_key}",
+    "Content-Type": "application/json"
+}
+
+# Load the Excel file
+input_file_path = r'C:\Users\ASUS\Desktop\amin\LLM quantization\datasets\stanford.xlsx'
+output_directory = r'C:\Users\ASUS\Desktop\amin\LLM quantization\experiment_1_output\ollama'
+safe_model_name = model_name.replace('/', '_') 
+
+# Ensure the output directory exists
+os.makedirs(output_directory, exist_ok=True)
+
+# Read the Excel file
+df = pd.read_excel(input_file_path)
+
+# Ensure the DataFrame has the required columns
+if 'question' not in df.columns:
+    raise ValueError("The Excel file must contain a 'question' column.")
+
+# Define system prompts with associated numbers
+user_prompts = [
+    (1, "Answer the following question."),
+    (2, "Imagine you are a medical faculty member facing this question. The goal of this question is to assess a physician's ability to apply knowledge for providing effective patient care. As an expert in the field, answer the question."),
+    (3, "Answer the following question. Please detail your reasoning process."),
+    (4, "Answer the following question. Please provide a justification for your answer."),
+    (5, "Imagine you are a medical faculty member facing this question. The goal of this question is to assess a physician's ability to apply knowledge, concepts, and principles crucial for providing safe and effective patient care. As an expert in the field, answer the question and say why?"),
+    (6, "Imagine you are a medical faculty member facing this question. The goal of this question is to assess a physician's ability to apply knowledge, concepts, and principles crucial for providing safe and effective patient care. As an expert in the field, answer the question and rate your confidence level in the correctness of your answer from 1 to 10, where 10 is the most confident.")
+]
+
+def create_prompt(question, system_prompt):
+    """
+    Creates a formatted prompt message for the API request.
+    """
+    messages = [
+        {"role": "user", "content": f"{system_prompt} Question: {question}"}
+    ]
+    return messages  # Returning structured messages directly
+
+def generate_answer(prompt, temperature, max_tokens):
+    """
+    Sends a request to the AI model and retrieves the response.
+    """
+    payload = {
+        "model": model_name,
+        "messages": prompt,
+        "temperature": temperature,
+        "max_tokens": max_tokens
+    }
+
+    start_time = time.time()  # Start timer before API call
+    response = requests.post(api_endpoint, headers=headers, json=payload)
+    end_time = time.time()  # End timer after API call
+
+    inference_time = end_time - start_time  # Calculate inference time
+
+    if response.status_code == 200:
+        data = response.json()
+        return {
+            'data': data,  # Full response object
+            'final_answer': data['choices'][0]['message']['content'],  # Extract final answer
+            'prompt_tokens': data['usage']['prompt_tokens'],
+            'completion_tokens': data['usage']['completion_tokens'],
+            'inference_time': inference_time  # Save inference time
+        }
+    else:
+        print(f"Error: {response.status_code}, {response.text}")
+        return None
+
+def main():
+    for prompt_number, system_prompt in user_prompts:
+        for temperature in [0.1, 0.5, 1.0]:
+            for max_tokens in [512, 2048]:
+                results = []
+
+                # Metadata for tracking model and execution settings
+                device = "GPU"  # Change this if running on CPU
+                metadata = {
+                    'model_name': safe_model_name,
+                    'prompt_number': prompt_number,
+                    'max_tokens': max_tokens,
+                    'temperature': temperature,
+                    'device': device
+                }
+
+                # Process each question in the dataset
+                for index, row in df.iterrows():
+                    question = row['question']
+                    
+                    prompt = create_prompt(question, system_prompt)
+                    if prompt:
+                        answer = generate_answer(prompt, temperature, max_tokens)
+
+                        # Store results while keeping original columns
+                        result = {
+                            **row.to_dict(),  # Preserve all original columns
+                            'system_prompt': system_prompt,
+                            'temperature': temperature,
+                            'max_tokens': max_tokens,
+                            'final_answer': answer['final_answer'] if answer else None,  # Save final answer
+                            'response': answer['data'] if answer else None,  # Full API response
+                            'Inference Time': answer['inference_time'] if answer else None,  # Save inference time
+                            'Input Token Count': answer['prompt_tokens'] if answer else None,
+                            'Output Token Count': answer['completion_tokens'] if answer else None,
+                            'metadata': metadata  # Add metadata
+                        }
+                        results.append(result)
+
+                        # Save every 3 questions and at the last question
+                        if (index + 1) % 3 == 0 or index == len(df) - 1:
+                            # Convert results to DataFrame
+                            result_df = pd.DataFrame(results)
+
+                            # Construct file name with relevant information
+                            output_file_name = f'{safe_model_name}_prompt_{prompt_number}_max_{max_tokens}_temp_{temperature}_device_{device}.xlsx'
+                            output_file_path = os.path.join(output_directory, output_file_name)
+
+                            # Save DataFrame to Excel
+                            result_df.to_excel(output_file_path, index=False)
+                            print(f"Results saved to {output_file_path}")
+
+if __name__ == "__main__":
+    main()
